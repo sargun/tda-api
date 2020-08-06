@@ -138,6 +138,7 @@ class StreamClient(EnumEnforcer):
                 'Receive {}: Returning message from overflow: {}'.format(
                     self.req_num(), json.dumps(ret, indent=4)))
         else:
+            self.logger.debug(f'Task {asyncio.current_task()} calling receive')
             raw = await self._socket.recv()
             try:
                 ret = json.loads(raw)

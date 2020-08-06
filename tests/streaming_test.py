@@ -1,3 +1,5 @@
+import asyncio
+import websockets
 import tda
 import urllib.parse
 import json
@@ -3423,3 +3425,86 @@ class StreamClientTest(IsolatedAsyncioTestCase):
     async def test_subscribe_without_login(self, ws_connect):
         with self.assertRaisesRegex(ValueError, '.*Socket not open.*'):
             await self.client.chart_equity_subs(['GOOG,MSFT'])
+
+    @no_duplicates
+    async def test_change_subs(self):
+        goog_quote = {
+            'key': 'GOOG',
+            'delayed': False,
+            'assetMainType': 'EQUITY',
+            'cusip': '02079K107',
+        }
+        msft_quote = {
+            'key': 'MSFT',
+            'delayed': False,
+            'assetMainType': 'EQUITY',
+            'cusip': '594918104',
+        }
+
+        both_quote = {
+            'data': [{
+                'service': 'QUOTE',
+                'command': 'SUBS',
+                'timestamp': 1,
+                'content': [goog_quote, msft_quote]
+            }]
+        }
+
+        goog_only_quote = {
+            'data': [{
+                'service': 'QUOTE',
+                'command': 'SUBS',
+                'timestamp': 2,
+                'content': [goog_quote]
+            }]
+        }
+        async def fake_server(websocket, path):
+            # Login flow:
+            print(await websocket.recv())
+            await websocket.send(json.dumps(self.success_response(0, 'ADMIN', 'LOGIN')))
+
+            # Request first quote:
+            print(await websocket.recv())
+            await websocket.send(json.dumps(self.success_response(1, 'QUOTE', 'SUBS')))
+            await websocket.send(json.dumps(both_quote))
+
+            await asyncio.sleep(2)
+            # Request second quote configuration
+            print(await websocket.recv())
+            await asyncio.sleep(2)
+            await websocket.send(json.dumps(self.success_response(2, 'QUOTE', 'SUBS')))
+            await websocket.send(json.dumps(goog_only_quote))
+            await asyncio.sleep(2)
+
+
+        async with websockets.serve(fake_server, "127.0.0.1", 0) as server:
+            self.assertTrue(len(server.sockets) == 1)
+            (host, port) = server.sockets[0].getsockname()
+
+            async def fake_connect(*args, **kwargs):
+                nonlocal host, port
+                return await websockets.connect(f'ws://{host}:{port}/ws')
+
+            with patch('tda.streaming.websockets.client.connect', new=fake_connect):
+                mock = AsyncMock()
+                socket = await self.login_and_get_socket(mock)
+                task = None
+                def real_handler(x):
+                    print(f'Got quotes: {x}')
+                    nonlocal task
+                    if not task:
+                        async def bad():
+                            print('Starting to change subscriptions')
+                            await self.client.level_one_equity_subs(['GOOG'])
+                            print('Finished changing subscriptions')
+
+                        task = asyncio.create_task(bad())
+
+                self.client.add_level_one_equity_handler(real_handler)
+                await self.client.level_one_equity_subs(['GOOG', 'MSFT'])
+                # Should get message with quotes
+                await self.client.handle_message()
+                # Should get quotes
+                print('waiting to get second set of quotes')
+                await self.client.handle_message()
+                print('Got second set of quotes')
